@@ -27,9 +27,10 @@ import (
 	"strconv"
 	"strings"
 
+	"sort"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/log"
-	"sort"
 )
 
 var (
@@ -43,25 +44,22 @@ var (
 		"Query response time in seconds.",
 		nil, nil)
 
+	//see https://nlnetlabs.nl/documentation/unbound/unbound-control/
+
 	unboundMetrics = []*unboundMetric{
+		//STATISTIC COUNTERS
 		newUnboundMetric(
-			"answer_rcodes_total",
-			"Total number of answers to queries, from cache or from recursion, by response code.",
+			"queries_total",
+			"Total number of queries received by thread.",
 			prometheus.CounterValue,
-			[]string{"rcode"},
-			"^num\\.answer\\.rcode\\.(\\w+)$"),
+			[]string{"thread"},
+			"^thread(\\d+)\\.num\\.queries$"),
 		newUnboundMetric(
-			"answers_bogus",
-			"Total number of answers that were bogus.",
+			"ip_ratelimited_queries_total",
+			"Total number of queries rate limited by thread.",
 			prometheus.CounterValue,
-			nil,
-			"^num\\.answer\\.bogus$"),
-		newUnboundMetric(
-			"answers_secure_total",
-			"Total number of answers that were secure.",
-			prometheus.CounterValue,
-			nil,
-			"^num\\.answer\\.secure$"),
+			[]string{"thread"},
+			"^thread(\\d+)\\.num\\.ip_ratelimited$"),
 		newUnboundMetric(
 			"cache_hits_total",
 			"Total number of queries that were successfully answered using a cache lookup.",
@@ -70,10 +68,101 @@ var (
 			"^thread(\\d+)\\.num\\.cachehits$"),
 		newUnboundMetric(
 			"cache_misses_total",
-			"Total number of cache queries that needed recursive processing.",
+			"Total number of queries that needed recursive processing.",
 			prometheus.CounterValue,
 			[]string{"thread"},
 			"^thread(\\d+)\\.num\\.cachemiss$"),
+		newUnboundMetric(
+			"dnscrypt_crypted_total",
+			"Total number of queries that were encrypted and successfully decapsulated by dnscrypt.",
+			prometheus.CounterValue,
+			[]string{"thread"},
+			"^thread(\\d+)\\.num\\.dnscrypt\\.crypted$"),
+		newUnboundMetric(
+			"dnscrypt_cert_total",
+			"Total number of queries that were requesting dnscrypt certificates.",
+			prometheus.CounterValue,
+			[]string{"thread"},
+			"^thread(\\d+)\\.num\\.dnscrypt\\.cert$"),
+		newUnboundMetric(
+			"dnscrypt_cleartext_total",
+			"Total number of queries received on dnscrypt port that were cleartext and not a request for certificates.",
+			prometheus.CounterValue,
+			[]string{"thread"},
+			"^thread(\\d+)\\.num\\.dnscrypt\\.cleartext$"),
+		newUnboundMetric(
+			"dnscrypt_malformed_total",
+			"Total number of request that were neither cleartext, not valid dnscrypt messages.",
+			prometheus.CounterValue,
+			[]string{"thread"},
+			"^thread(\\d+)\\.num\\.dnscrypt\\.malformed$"),
+		newUnboundMetric(
+			"prefetches_total",
+			"Total number of cache prefetches performed.",
+			prometheus.CounterValue,
+			[]string{"thread"},
+			"^thread(\\d+)\\.num\\.prefetch$"),
+		newUnboundMetric(
+			"zero_ttl_total",
+			"Total number of replies with ttl zero, because they served an expired cache entry.",
+			prometheus.CounterValue,
+			[]string{"thread"},
+			"^thread(\\d+)\\.num\\.zero_ttl$"),
+		newUnboundMetric(
+			"recursive_replies_total",
+			"Total number of replies sent to queries that needed recursive processing.",
+			prometheus.CounterValue,
+			[]string{"thread"},
+			"^thread(\\d+)\\.num\\.recursivereplies$"),
+		newUnboundMetric(
+			"request_list_current_avg",
+			"average size of the request list, including internally generated queries.",
+			prometheus.GaugeValue,
+			[]string{"thread"},
+			"^thread([0-9]+)\\.requestlist\\.current\\.avg$"),
+		newUnboundMetric(
+			"request_list_overwritten_total",
+			"Total number of requests in the request list that were overwritten by newer entries.",
+			prometheus.CounterValue,
+			[]string{"thread"},
+			"^thread([0-9]+)\\.requestlist\\.overwritten$"),
+		newUnboundMetric(
+			"request_list_exceeded_total",
+			"Number of queries that were dropped because the request list was full.",
+			prometheus.CounterValue,
+			[]string{"thread"},
+			"^thread([0-9]+)\\.requestlist\\.exceeded$"),
+		newUnboundMetric(
+			"request_list_current_user",
+			"Current size of the request list, only counting the requests from client queries.",
+			prometheus.GaugeValue,
+			[]string{"thread"},
+			"^thread([0-9]+)\\.requestlist\\.current\\.user$"),
+		newUnboundMetric(
+			"tcpusage",
+			"The currently held tcp buffers for incoming connections.",
+			prometheus.GaugeValue,
+			[]string{"thread"},
+			"^thread([0-9]+)\\.tcpusage$"),
+		newUnboundMetric(
+			"request_list_max_size",
+			"The maximum of the thread requestlist.max values.",
+			prometheus.GaugeValue,
+			nil,
+			"^total\\.requestlist\\.current\\.max$"),
+		newUnboundMetric(
+			"recursion_time_seconds_avg",
+			"Average time it took to answer queries that needed recursive processing (does not include in-cache requests).",
+			prometheus.GaugeValue,
+			nil,
+			"^total\\.recursion\\.time\\.avg$"),
+		newUnboundMetric(
+			"recursion_time_seconds_median",
+			"The median of the time it took to answer queries that needed recursive processing.",
+			prometheus.GaugeValue,
+			nil,
+			"^total\\.recursion\\.time\\.median$"),
+		// EXTENDED STATISTICS
 		newUnboundMetric(
 			"memory_caches_bytes",
 			"Memory in bytes in use by caches.",
@@ -87,71 +176,11 @@ var (
 			[]string{"module"},
 			"^mem\\.mod\\.(\\w+)$"),
 		newUnboundMetric(
-			"memory_sbrk_bytes",
-			"Memory in bytes allocated through sbrk.",
+			"memory_streamwait_bytes",
+			"Memory in bytes in used by the TCP and TLS stream wait buffers.",
 			prometheus.GaugeValue,
 			nil,
-			"^mem\\.total\\.sbrk$"),
-		newUnboundMetric(
-			"prefetches_total",
-			"Total number of cache prefetches performed.",
-			prometheus.CounterValue,
-			[]string{"thread"},
-			"^thread(\\d+)\\.num\\.prefetch$"),
-		newUnboundMetric(
-			"queries_total",
-			"Total number of queries received.",
-			prometheus.CounterValue,
-			[]string{"thread"},
-			"^thread(\\d+)\\.num\\.queries$"),
-		newUnboundMetric(
-			"query_classes_total",
-			"Total number of queries with a given query class.",
-			prometheus.CounterValue,
-			[]string{"class"},
-			"^num\\.query\\.class\\.([\\w]+)$"),
-		newUnboundMetric(
-			"query_flags_total",
-			"Total number of queries that had a given flag set in the header.",
-			prometheus.CounterValue,
-			[]string{"flag"},
-			"^num\\.query\\.flags\\.([\\w]+)$"),
-		newUnboundMetric(
-			"query_ipv6_total",
-			"Total number of queries that were made using IPv6 towards the Unbound server.",
-			prometheus.CounterValue,
-			nil,
-			"^num\\.query\\.ipv6$"),
-		newUnboundMetric(
-			"query_opcodes_total",
-			"Total number of queries with a given query opcode.",
-			prometheus.CounterValue,
-			[]string{"opcode"},
-			"^num\\.query\\.opcode\\.([\\w]+)$"),
-		newUnboundMetric(
-			"query_edns_DO_total",
-			"Total number of queries that had an EDNS OPT record with the DO (DNSSEC OK) bit set present.",
-			prometheus.CounterValue,
-			nil,
-			"^num\\.query\\.edns\\.DO$"),
-		newUnboundMetric(
-			"query_edns_present_total",
-			"Total number of queries that had an EDNS OPT record present.",
-			prometheus.CounterValue,
-			nil,
-			"^num\\.query\\.edns\\.present$"),
-		newUnboundMetric(
-			"query_tcp_total",
-			"Total number of queries that were made using TCP towards the Unbound server.",
-			prometheus.CounterValue,
-			nil,
-			"^num\\.query\\.tcp$"),
-		newUnboundMetric(
-			"query_tls_total",
-			"Total number of queries that were made using TCP TLS towards the Unbound server.",
-			prometheus.CounterValue,
-			nil,
-			"^num\\.query\\.tls$"),
+			"^mem\\.total\\.streamwait$"),
 		newUnboundMetric(
 			"query_types_total",
 			"Total number of queries with a given query type.",
@@ -159,59 +188,107 @@ var (
 			[]string{"type"},
 			"^num\\.query\\.type\\.([\\w]+)$"),
 		newUnboundMetric(
-			"request_list_current_all",
-			"Current size of the request list, including internally generated queries.",
-			prometheus.GaugeValue,
-			[]string{"thread"},
-			"^thread([0-9]+)\\.requestlist\\.current\\.all$"),
-		newUnboundMetric(
-			"request_list_current_user",
-			"Current size of the request list, only counting the requests from client queries.",
-			prometheus.GaugeValue,
-			[]string{"thread"},
-			"^thread([0-9]+)\\.requestlist\\.current\\.user$"),
-		newUnboundMetric(
-			"request_list_exceeded_total",
-			"Number of queries that were dropped because the request list was full.",
+			"query_classes_total",
+			"Total number of queries with a given query class.",
 			prometheus.CounterValue,
-			[]string{"thread"},
-			"^thread([0-9]+)\\.requestlist\\.exceeded$"),
+			[]string{"class"},
+			"^num\\.query\\.class\\.([\\w]+)$"),
 		newUnboundMetric(
-			"request_list_overwritten_total",
-			"Total number of requests in the request list that were overwritten by newer entries.",
+			"query_opcodes_total",
+			"Total number of queries with a given query opcode.",
 			prometheus.CounterValue,
-			[]string{"thread"},
-			"^thread([0-9]+)\\.requestlist\\.overwritten$"),
+			[]string{"opcode"},
+			"^num\\.query\\.opcode\\.([\\w]+)$"),
 		newUnboundMetric(
-			"recursive_replies_total",
-			"Total number of replies sent to queries that needed recursive processing.",
+			"query_tcp_total",
+			"Total number of queries that were made using TCP towards the Unbound server.",
 			prometheus.CounterValue,
-			[]string{"thread"},
-			"^thread(\\d+)\\.num\\.recursivereplies$"),
+			nil,
+			"^num\\.query\\.tcp$"),
+		newUnboundMetric(
+			"query_tcpout_total",
+			"Total number of queries that the unbound server made using TCP  outgoing towards other servers.",
+			prometheus.CounterValue,
+			nil,
+			"^num\\.query\\.tcpout$"),
+		newUnboundMetric(
+			"query_tls_total",
+			"Total number of queries that were made using TCP TLS towards the Unbound server.",
+			prometheus.CounterValue,
+			nil,
+			"^num\\.query\\.tls$"),
+		newUnboundMetric(
+			"query_tls_resume_total",
+			"Total number of TLS  session resumptions.",
+			prometheus.CounterValue,
+			nil,
+			"^num\\.query\\.tls\\.resume$"),
+		newUnboundMetric(
+			"query_ipv6_total",
+			"Total number of queries that were made using IPv6 towards the Unbound server.",
+			prometheus.CounterValue,
+			nil,
+			"^num\\.query\\.ipv6$"),
+		newUnboundMetric(
+			"query_flags_total",
+			"Total number of queries that had a given flag set in the header.",
+			prometheus.CounterValue,
+			[]string{"flag"},
+			"^num\\.query\\.flags\\.([\\w]+)$"),
+		newUnboundMetric(
+			"query_edns_present_total",
+			"Total number of queries that had an EDNS OPT record present.",
+			prometheus.CounterValue,
+			nil,
+			"^num\\.query\\.edns\\.present$"),
+		newUnboundMetric(
+			"query_edns_DO_total",
+			"Total number of queries that had an EDNS OPT record with the DO (DNSSEC OK) bit set present.",
+			prometheus.CounterValue,
+			nil,
+			"^num\\.query\\.edns\\.DO$"),
+		newUnboundMetric(
+			"query_ratelimited_total",
+			"Total number of queries that are turned away from being send to nameserver due to ratelimiting.",
+			prometheus.CounterValue,
+			nil,
+			"^num\\.query\\.ratelimited$"),
+		newUnboundMetric(
+			"query_dnscrypt_shared_secret_cachemiss_total",
+			"Total number of dnscrypt queries that did not find a shared secret in the cache.",
+			prometheus.CounterValue,
+			nil,
+			"^num\\.query\\.dnscrypt\\.shared_secret\\.cachemiss$"),
+		newUnboundMetric(
+			"query_dnscrypt_replay_total",
+			"The number of dnscrypt queries that found a nonce hit in the nonce cache and hence are considered a query replay.",
+			prometheus.CounterValue,
+			nil,
+			"^num\\.query\\.dnscrypt\\.replay$"),
+		newUnboundMetric(
+			"answer_rcodes_total",
+			"Total number of answers to queries, from cache or from recursion, by response code.",
+			prometheus.CounterValue,
+			[]string{"rcode"},
+			"^num\\.answer\\.rcode\\.(\\w+)$"),
+		newUnboundMetric(
+			"answers_secure_total",
+			"Total number of answers that were secure.",
+			prometheus.CounterValue,
+			nil,
+			"^num\\.answer\\.secure$"),
+		newUnboundMetric(
+			"answers_bogus_total",
+			"Total number of answers that were bogus.",
+			prometheus.CounterValue,
+			nil,
+			"^num\\.answer\\.bogus$"),
 		newUnboundMetric(
 			"rrset_bogus_total",
 			"Total number of rrsets marked bogus by the validator.",
 			prometheus.CounterValue,
 			nil,
 			"^num\\.rrset\\.bogus$"),
-		newUnboundMetric(
-			"time_elapsed_seconds",
-			"Time since last statistics printout in seconds.",
-			prometheus.CounterValue,
-			nil,
-			"^time\\.elapsed$"),
-		newUnboundMetric(
-			"time_now_seconds",
-			"Current time in seconds since 1970.",
-			prometheus.GaugeValue,
-			nil,
-			"^time\\.now$"),
-		newUnboundMetric(
-			"time_up_seconds_total",
-			"Uptime since server boot in seconds.",
-			prometheus.CounterValue,
-			nil,
-			"^time\\.up$"),
 		newUnboundMetric(
 			"unwanted_queries_total",
 			"Total number of queries that were refused or dropped because they failed the access control settings.",
@@ -225,18 +302,6 @@ var (
 			nil,
 			"^unwanted\\.replies$"),
 		newUnboundMetric(
-			"recursion_time_seconds_avg",
-			"Average time it took to answer queries that needed recursive processing (does not include in-cache requests).",
-			prometheus.GaugeValue,
-			nil,
-			"^total\\.recursion\\.time\\.avg$"),
-		newUnboundMetric(
-			"recursion_time_seconds_median",
-			"The median of the time it took to answer queries that needed recursive processing.",
-			prometheus.GaugeValue,
-			nil,
-			"^total\\.recursion\\.time\\.median$"),
-		newUnboundMetric(
 			"msg_cache_count",
 			"The Number of Messages cached",
 			prometheus.GaugeValue,
@@ -248,6 +313,30 @@ var (
 			prometheus.GaugeValue,
 			nil,
 			"^rrset\\.cache\\.count$"),
+		newUnboundMetric(
+			"infra_cache_count",
+			"The number of items in the infra cache.",
+			prometheus.GaugeValue,
+			nil,
+			"^infra\\.cache\\.count$"),
+		newUnboundMetric(
+			"key_cache_count",
+			"The number of items in the key cache.",
+			prometheus.GaugeValue,
+			nil,
+			"^key\\.cache\\.count$"),
+		newUnboundMetric(
+			"dnscrypt_shared_secret_cache_count",
+			"The number of items in the shared secret cache.",
+			prometheus.GaugeValue,
+			nil,
+			"^dnscrypt_shared_secret\\.cache\\.count$"),
+		newUnboundMetric(
+			"dnscrypt_nonce_cache_count",
+			"The number of items in the client nonce cache.",
+			prometheus.GaugeValue,
+			nil,
+			"^dnscrypt_nonce\\.cache\\.count$"),
 	}
 )
 
